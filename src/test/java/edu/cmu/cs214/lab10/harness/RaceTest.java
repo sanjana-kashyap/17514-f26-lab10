@@ -1,5 +1,17 @@
 package edu.cmu.cs214.lab10.harness;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import edu.cmu.cs214.lab10.domain.BookingResult;
+import edu.cmu.cs214.lab10.domain.BookingStatus;
+import edu.cmu.cs214.lab10.domain.Room;
+import edu.cmu.cs214.lab10.service.BookingService;
+import edu.cmu.cs214.lab10.store.InMemoryBookingStore;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.Test;
+
 /**
  * Where your concurrency tests go.
  *
@@ -77,4 +89,50 @@ class RaceTest {
     // An end-state assertion still means something after you change the code
     // underneath it. A schedule assertion does not.
     // ------------------------------------------------------------------
+
+    private static final String WEAN = "WEH-5409";
+    private static final List<Room> ROOMS = List.of(new Room(WEAN, "Wean 5409", 12));
+
+    /**
+     * RES-4471: two customers both get CONFIRMED for the same room and slot.
+     *
+     * <p>{@code BookingService.book} calls {@code hasOverlap} and then
+     * {@code insert}; each is atomic on its own but nothing makes the pair
+     * atomic. The gate parks customer A right after the FIRST {@code hasOverlap}
+     * returns false (the "free" answer is already in A's hands). Customer B then
+     * runs the whole book() call, sees the slot free, and inserts. When A is
+     * released it acts on its stale answer and inserts too.
+     *
+     * <p>Asserts on the end state of the real store, not on the schedule.
+     */
+    @Test
+    void twoCustomersCannotHoldTheSameSlot() throws InterruptedException {
+        InMemoryBookingStore real = new InMemoryBookingStore();
+        PausingStore gated = new PausingStore(real, "hasOverlap", 1);
+        BookingService service = new BookingService(gated, ROOMS);
+
+        AtomicReference<BookingResult> resultA = new AtomicReference<>();
+        AtomicReference<BookingResult> resultB = new AtomicReference<>();
+
+        Thread a = new Thread(() -> resultA.set(service.book(WEAN, 900, 960)));
+        a.start();
+
+        assertTrue(gated.awaitPaused(), "customer A never reached hasOverlap call 1");
+
+        Thread b = new Thread(() -> resultB.set(service.book(WEAN, 900, 960)));
+        b.start();
+        b.join(PausingStore.TIMEOUT_MILLIS);
+
+        gated.release();
+        a.join(PausingStore.TIMEOUT_MILLIS);
+
+        long confirmed = real.bookingsForRoom(WEAN).stream()
+                .filter(bk -> bk.status() == BookingStatus.CONFIRMED)
+                .count();
+        assertEquals(1, confirmed, "a room may have only one CONFIRMED booking for a slot");
+        assertEquals(
+                1,
+                List.of(resultA.get(), resultB.get()).stream().filter(BookingResult::isConfirmed).count(),
+                "exactly one customer should be told CONFIRMED");
+    }
 }
