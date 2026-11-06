@@ -3,6 +3,7 @@ package edu.cmu.cs214.lab10.harness;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import edu.cmu.cs214.lab10.domain.Booking;
 import edu.cmu.cs214.lab10.domain.BookingResult;
 import edu.cmu.cs214.lab10.domain.BookingStatus;
 import edu.cmu.cs214.lab10.domain.Room;
@@ -128,6 +129,56 @@ class RaceTest {
 
         long confirmed = real.bookingsForRoom(WEAN).stream()
                 .filter(bk -> bk.status() == BookingStatus.CONFIRMED)
+                .count();
+        assertEquals(1, confirmed, "a room may have only one CONFIRMED booking for a slot");
+        assertEquals(
+                1,
+                List.of(resultA.get(), resultB.get()).stream().filter(BookingResult::isConfirmed).count(),
+                "exactly one customer should be told CONFIRMED");
+    }
+
+    /**
+     * Re-aimed at the patched {@code book()}, which calls {@code hasOverlap} a
+     * second time right before {@code insert}.
+     *
+     * <p>Call 1 is used up by a throwaway customer who is rejected from a slot
+     * that is already held. Then customer A makes call 2 (the check) and call 3
+     * (the re-check). The gate parks A after call 3 returns false, which is the
+     * gap between the re-check and {@code insert}. Customer B runs the whole
+     * {@code book()} (calls 4 and 5), inserts, and is CONFIRMED. Releasing A
+     * makes it insert on its stale re-check.
+     *
+     * <p>Against the original, unpatched {@code book()} A makes only call 2, so
+     * the gate never fires and the first assertion fails: this aim only means
+     * something against code that has the second check.
+     */
+    @Test
+    void twoCustomersCannotHoldTheSameSlotAfterTheRecheck() throws InterruptedException {
+        InMemoryBookingStore real = new InMemoryBookingStore();
+        real.insert(new Booking("seed-1", WEAN, 540, 600, BookingStatus.CONFIRMED));
+        PausingStore gated = new PausingStore(real, "hasOverlap", 3);
+        BookingService service = new BookingService(gated, ROOMS);
+
+        // hasOverlap call 1: rejected, so it makes exactly one store call.
+        assertTrue(service.book(WEAN, 540, 600).isRejected());
+
+        AtomicReference<BookingResult> resultA = new AtomicReference<>();
+        AtomicReference<BookingResult> resultB = new AtomicReference<>();
+
+        Thread a = new Thread(() -> resultA.set(service.book(WEAN, 900, 960)));
+        a.start();
+
+        assertTrue(gated.awaitPaused(), "customer A never reached hasOverlap call 3");
+
+        Thread b = new Thread(() -> resultB.set(service.book(WEAN, 900, 960)));
+        b.start();
+        b.join(PausingStore.TIMEOUT_MILLIS);
+
+        gated.release();
+        a.join(PausingStore.TIMEOUT_MILLIS);
+
+        long confirmed = real.bookingsForRoom(WEAN).stream()
+                .filter(bk -> bk.status() == BookingStatus.CONFIRMED && bk.startMinute() == 900)
                 .count();
         assertEquals(1, confirmed, "a room may have only one CONFIRMED booking for a slot");
         assertEquals(

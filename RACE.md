@@ -80,13 +80,39 @@ same room and range with nothing between them, matching the ticket's log excerpt
 
 ## Milestone 2: the patch a teammate sent
 
-**Your milestone-1 test on the patched code.** Green or red. Paste the result.
+**Your milestone-1 test on the patched code.** Green.
 
-**The re-aimed run.** Method name, call index, the pasted result, and one line on why that aim tests
-the patch rather than sidestepping it.
+```
+2026-11-06T15:17:37.297Z INFO booking.confirmed booking=bk-1 room=WEH-5409 start=900 end=960
+2026-11-06T15:17:37.301Z INFO booking.rejected room=WEH-5409 start=900 end=960 reason=slot already held
+Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+```
 
-**Your verdict.** Accept or reject, and what your milestone-1 result does and does not show about
-the patch.
+Green here only shows the patch beats this one schedule, where A is parked after check 1. The
+re-check adds a second `hasOverlap` call that is still a separate step from `insert`, and this test
+never parks between those two.
+
+**The re-aimed run.**
+
+Aim: `PausingStore(real, "hasOverlap", 3)`, in
+`RaceTest.twoCustomersCannotHoldTheSameSlotAfterTheRecheck`. Call 1 is a throwaway rejected booking,
+call 2 is A's first check, call 3 is A's re-check, so A is parked after the re-check and before
+`insert`. This tests the patch because it parks in the exact gap the patch left, and it only fires
+on code that has the second check (on the original code A makes only call 2 and the gate never
+fires).
+
+```
+2026-11-06T15:21:49.490Z INFO booking.rejected room=WEH-5409 start=540 end=600 reason=slot already held
+2026-11-06T15:21:49.497Z INFO booking.confirmed booking=bk-2 room=WEH-5409 start=900 end=960
+2026-11-06T15:21:49.497Z INFO booking.confirmed booking=bk-1 room=WEH-5409 start=900 end=960
+RaceTest.twoCustomersCannotHoldTheSameSlotAfterTheRecheck:183 a room may have only one CONFIRMED booking for a slot ==> expected: <1> but was: <2>
+```
+
+Red: the patched code still issues two CONFIRMED bookings for the same room and slot.
+
+**Your verdict.** Reject the patch. The milestone-1 test is green only because it parks A before the
+re-check; parking A after it (`hasOverlap`, call 3) still gives two CONFIRMED bookings, 3 of 3 runs.
+The check and `insert` are still separate steps, so the window only moved.
 
 ---
 
