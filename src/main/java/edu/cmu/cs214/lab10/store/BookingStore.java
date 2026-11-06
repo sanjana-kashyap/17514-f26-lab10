@@ -25,8 +25,18 @@ public interface BookingStore {
      */
     boolean hasOverlap(String roomId, int startMinute, int endMinute);
 
-    /** Stores the booking. Ids are assumed unique; the store does not check. */
-    void insert(Booking booking);
+    /**
+     * Stores the booking. Ids are assumed unique; the store does not check.
+     *
+     * <p>A CONFIRMED booking is stored only if the room has no CONFIRMED booking
+     * touching its range. That check and the write are one indivisible step: no
+     * other thread can insert between them. Bookings in any other status are
+     * stored unconditionally, since they hold nothing.
+     *
+     * @return true when the booking was stored, false when it was CONFIRMED and
+     *     a confirmed booking overlapped, in which case nothing was written
+     */
+    boolean insert(Booking booking);
 
     /**
      * Every booking held for the room, in insertion order, in every status.

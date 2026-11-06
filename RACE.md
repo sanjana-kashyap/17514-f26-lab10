@@ -118,15 +118,64 @@ The check and `insert` are still separate steps, so the window only moved.
 
 ## Milestone 3: the fix you would ship
 
-**Which option, and what you changed.** Name the lock or the atomic operation and the two operations
-it now covers. Paste the diff of your change and the passing run of your milestone-1 test and the
-full suite.
+**Which option, and what you changed.** The store's own lock now covers the overlap check and the
+write: `InMemoryBookingStore.insert` is one `synchronized` step that rejects a CONFIRMED booking if
+one already overlaps and returns `boolean`, and `book()` calls only `insert`. The diff below is
+against the patched code (the teammate's re-check was already in the tree), so it also drops that
+re-check.
 
-**Is your milestone-1 test still testing anything?** After your fix, describe what that test now
-exercises. Did `PausingStore` pause a call during the green run? How do you know?
+```diff
+ // BookingService.book()
+-        if (store.hasOverlap(roomId, startMinute, endMinute)) {
+-            return reject(roomId, startMinute, endMinute, "slot already held");
+-        }
+         Booking booking = new Booking(nextId(), roomId, startMinute, endMinute, BookingStatus.CONFIRMED);
+-        // Defensive re-check. ...
+-        if (store.hasOverlap(roomId, startMinute, endMinute)) {
++        if (!store.insert(booking)) {
+             return reject(roomId, startMinute, endMinute, "slot already held");
+         }
+-        store.insert(booking);
+ // InMemoryBookingStore
+-    public synchronized void insert(Booking booking) {
++    public synchronized boolean insert(Booking booking) {
++        if (booking.status() == BookingStatus.CONFIRMED
++                && hasOverlap(booking.roomId(), booking.startMinute(), booking.endMinute())) {
++            return false;
++        }
+         bookings.add(booking);
++        return true;
+     }
+```
 
-**What runs one at a time now that ran in parallel before.** Name concretely which callers queue
-behind which. "Nothing, it is just correct now" does not count as an answer.
+`BookingStore.insert` and `PausingStore.insert` change to return `boolean` to match. Passing runs
+(test re-aimed at `insert`, call 1, since `book()` no longer calls `hasOverlap`):
 
-**What you left unfixed.** For anything your review flagged that you chose not to fix, one line each
-on why.
+```
+INFO booking.rejected room=WEH-5409 start=900 end=960 reason=slot already held
+INFO booking.confirmed booking=bk-1 room=WEH-5409 start=900 end=960
+Tests run: 2, Failures: 0, Errors: 0, Skipped: 0      (RaceTest)
+Tests run: 13, Failures: 0, Errors: 0, Skipped: 0     (full suite)
+```
+
+**Is your milestone-1 test still testing anything?** Barely. `PausingStore` did park A:
+`awaitPaused()` passed, and the log shows B rejected while A was still parked, before A's
+confirmation. But the gate fires after `insert` returns and the lock is released, so the test only
+shows that B sees A's stored booking. It would also pass if the check and write were two separate
+steps inside `insert`; the evidence the fix matters is that the same scenario failed on the unfixed
+and patched code.
+
+**What runs one at a time now that ran in parallel before.** Every `book()` queues behind every
+other `book()`, `cancelAndPromote`, `bookingsForRoom` and `joinWaitlist` call on the store's single
+monitor, across all rooms. Before, each store call was also locked, but the check and write were
+separate critical steps, so two `book()` calls for one slot could interleave between them. Now each
+`book()` holds the lock for the whole scan and add.
+
+**What you left unfixed.**
+
+- `hasOverlap` is still public, so a caller can still write check-then-insert; left because `insert`
+  now enforces the invariant on its own.
+- One lock for all rooms, not per room; left because the store is a small in-memory list.
+- `BookingStats` counters can read low; documented as approximate and nothing depends on them.
+- `BookingService`'s class javadoc still says store-level thread safety makes the service safe; left
+  because it is not part of this ticket.

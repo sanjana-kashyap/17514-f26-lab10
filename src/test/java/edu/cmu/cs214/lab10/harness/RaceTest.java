@@ -3,7 +3,6 @@ package edu.cmu.cs214.lab10.harness;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import edu.cmu.cs214.lab10.domain.Booking;
 import edu.cmu.cs214.lab10.domain.BookingResult;
 import edu.cmu.cs214.lab10.domain.BookingStatus;
 import edu.cmu.cs214.lab10.domain.Room;
@@ -97,19 +96,18 @@ class RaceTest {
     /**
      * RES-4471: two customers both get CONFIRMED for the same room and slot.
      *
-     * <p>{@code BookingService.book} calls {@code hasOverlap} and then
-     * {@code insert}; each is atomic on its own but nothing makes the pair
-     * atomic. The gate parks customer A right after the FIRST {@code hasOverlap}
-     * returns false (the "free" answer is already in A's hands). Customer B then
-     * runs the whole book() call, sees the slot free, and inserts. When A is
-     * released it acts on its stale answer and inserts too.
+     * <p>{@code BookingService.book} makes one {@code insert} call, which
+     * checks and writes under a single hold of the store lock. The gate parks
+     * customer A right after the FIRST {@code insert} returns, so A is
+     * already CONFIRMED and stored. Customer B then runs the whole book() call
+     * and must be rejected, because A's booking is already in the store.
      *
      * <p>Asserts on the end state of the real store, not on the schedule.
      */
     @Test
     void twoCustomersCannotHoldTheSameSlot() throws InterruptedException {
         InMemoryBookingStore real = new InMemoryBookingStore();
-        PausingStore gated = new PausingStore(real, "hasOverlap", 1);
+        PausingStore gated = new PausingStore(real, "insert", 1);
         BookingService service = new BookingService(gated, ROOMS);
 
         AtomicReference<BookingResult> resultA = new AtomicReference<>();
@@ -118,7 +116,7 @@ class RaceTest {
         Thread a = new Thread(() -> resultA.set(service.book(WEAN, 900, 960)));
         a.start();
 
-        assertTrue(gated.awaitPaused(), "customer A never reached hasOverlap call 1");
+        assertTrue(gated.awaitPaused(), "customer A never reached insert call 1");
 
         Thread b = new Thread(() -> resultB.set(service.book(WEAN, 900, 960)));
         b.start();
@@ -138,29 +136,17 @@ class RaceTest {
     }
 
     /**
-     * Re-aimed at the patched {@code book()}, which calls {@code hasOverlap} a
-     * second time right before {@code insert}.
-     *
-     * <p>Call 1 is used up by a throwaway customer who is rejected from a slot
-     * that is already held. Then customer A makes call 2 (the check) and call 3
-     * (the re-check). The gate parks A after call 3 returns false, which is the
-     * gap between the re-check and {@code insert}. Customer B runs the whole
-     * {@code book()} (calls 4 and 5), inserts, and is CONFIRMED. Releasing A
-     * makes it insert on its stale re-check.
-     *
-     * <p>Against the original, unpatched {@code book()} A makes only call 2, so
-     * the gate never fires and the first assertion fails: this aim only means
-     * something against code that has the second check.
+     * Same aim as above ({@code insert}, call 1), kept as the re-aim of
+     * the test that targeted the second {@code hasOverlap} in the rejected patch.
+     * With check and insert in one store call there is no gap after a check to
+     * park in, so the only schedule left is A parked after its atomic insert
+     * returns while B runs.
      */
     @Test
-    void twoCustomersCannotHoldTheSameSlotAfterTheRecheck() throws InterruptedException {
+    void twoCustomersCannotHoldTheSameSlotWhenParkedAfterTheAtomicInsert() throws InterruptedException {
         InMemoryBookingStore real = new InMemoryBookingStore();
-        real.insert(new Booking("seed-1", WEAN, 540, 600, BookingStatus.CONFIRMED));
-        PausingStore gated = new PausingStore(real, "hasOverlap", 3);
+        PausingStore gated = new PausingStore(real, "insert", 1);
         BookingService service = new BookingService(gated, ROOMS);
-
-        // hasOverlap call 1: rejected, so it makes exactly one store call.
-        assertTrue(service.book(WEAN, 540, 600).isRejected());
 
         AtomicReference<BookingResult> resultA = new AtomicReference<>();
         AtomicReference<BookingResult> resultB = new AtomicReference<>();
@@ -168,7 +154,7 @@ class RaceTest {
         Thread a = new Thread(() -> resultA.set(service.book(WEAN, 900, 960)));
         a.start();
 
-        assertTrue(gated.awaitPaused(), "customer A never reached hasOverlap call 3");
+        assertTrue(gated.awaitPaused(), "customer A never reached insert call 1");
 
         Thread b = new Thread(() -> resultB.set(service.book(WEAN, 900, 960)));
         b.start();
@@ -178,7 +164,7 @@ class RaceTest {
         a.join(PausingStore.TIMEOUT_MILLIS);
 
         long confirmed = real.bookingsForRoom(WEAN).stream()
-                .filter(bk -> bk.status() == BookingStatus.CONFIRMED && bk.startMinute() == 900)
+                .filter(bk -> bk.status() == BookingStatus.CONFIRMED)
                 .count();
         assertEquals(1, confirmed, "a room may have only one CONFIRMED booking for a slot");
         assertEquals(

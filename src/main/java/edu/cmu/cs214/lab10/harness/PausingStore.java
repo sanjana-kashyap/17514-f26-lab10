@@ -102,11 +102,8 @@ public final class PausingStore implements BookingStore {
     }
 
     @Override
-    public void insert(Booking booking) {
-        gate("insert", () -> {
-            delegate.insert(booking);
-            return null;
-        });
+    public boolean insert(Booking booking) {
+        return gate("insert", () -> delegate.insert(booking));
     }
 
     @Override

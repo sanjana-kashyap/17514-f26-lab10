@@ -32,8 +32,15 @@ public final class InMemoryBookingStore implements BookingStore {
     }
 
     @Override
-    public synchronized void insert(Booking booking) {
+    public synchronized boolean insert(Booking booking) {
+        // Check and add under one hold of the store lock. hasOverlap re-enters it,
+        // so the lock is never released between the two.
+        if (booking.status() == BookingStatus.CONFIRMED
+                && hasOverlap(booking.roomId(), booking.startMinute(), booking.endMinute())) {
+            return false;
+        }
         bookings.add(booking);
+        return true;
     }
 
     @Override
